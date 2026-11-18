@@ -47,5 +47,3 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1 .\samples\landscape.pixelart 
 ```
 
 Для воспроизводимой демонстрации из Python есть `examples/demo.ipynb`.
-
-Подробное описание классов, алгоритмов, формата, запуска и проверки — в [info.md](info.md).
