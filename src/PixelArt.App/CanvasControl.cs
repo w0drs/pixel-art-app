@@ -21,6 +21,7 @@ public sealed class CanvasControl : Control
     private int strokeColor;
     private EditorTool strokeTool;
     private int strokeSize;
+    private SmudgeBrush? smudge;
     private float zoom = 16;
     private PointF origin = new(40, 40);
 
@@ -36,6 +37,10 @@ public sealed class CanvasControl : Control
     public int PencilSize { get; set; } = 1;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int EraserSize { get; set; } = 1;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int SmudgeSize { get; set; } = 8;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int SmudgeStrength { get; set; } = 80;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int GridStep { get; set; } = 4;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -227,6 +232,8 @@ public sealed class CanvasControl : Control
         startPixel = lastPixel = point;
         strokeTool = Tool;
         strokeSize = Math.Clamp(Tool == EditorTool.Eraser ? EraserSize : PencilSize, 1, RasterDrawing.MaxBrushSize);
+        smudge = Tool == EditorTool.Smudge ? new SmudgeBrush(session.Document, point.X, point.Y,
+            Math.Clamp(SmudgeSize, 1, RasterDrawing.MaxBrushSize), Math.Clamp(SmudgeStrength, 0, 100)) : null;
         session.BeginEdit();
         drawing = true;
         gestureButton = e.Button;
@@ -255,6 +262,10 @@ public sealed class CanvasControl : Control
         {
             RasterDrawing.BrushStroke(session.Document, lastPixel.X, lastPixel.Y, point.X, point.Y, strokeColor, strokeSize);
             lastPixel = point;
+        }
+        else if (strokeTool == EditorTool.Smudge)
+        {
+            smudge!.MoveTo(point.X, point.Y);
         }
         else
         {
@@ -288,6 +299,7 @@ public sealed class CanvasControl : Control
             if (preview != null) session.Document.SetPixels(preview.CopyPixels());
             drawing = false;
             preview = null;
+            smudge = null;
             session.CommitEdit();
         }
         panning = false;
@@ -308,6 +320,7 @@ public sealed class CanvasControl : Control
         {
             drawing = false;
             preview = null;
+            smudge = null;
             session.CancelEdit();
         }
         panning = false;
