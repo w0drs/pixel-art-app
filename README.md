@@ -4,7 +4,7 @@
 
 ## Быстрый запуск
 
-Готовая автономная сборка на этом компьютере: `artifacts/PixelArt/PixelArt.App.exe`. Ее можно открыть двойным щелчком, установка .NET для нее не нужна. Папка `artifacts` не включается в Git: сборка создается скриптом `publish.ps1`.
+Готовая автономная сборка на этом компьютере: `artifacts/PixelArt/PixelArt.App.exe`. Установка .NET для нее не нужна. Папка `artifacts` не включается в Git: сборка создается скриптом `publish.ps1`.
 
 Запуск из исходников (Windows, установленный .NET 10 SDK):
 
@@ -71,4 +71,3 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1 .\samples\landscape.pixelart 
 
 Для воспроизводимой демонстрации из Python есть `examples/demo.ipynb`.
 
-Подробное описание классов, алгоритмов, формата, запуска и проверки — в [info.md](info.md). Документация до добавления главного экрана сохранена в `info.before-home-screen.md`.
