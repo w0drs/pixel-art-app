@@ -17,24 +17,32 @@ public sealed class MainForm : Form
     private readonly Dictionary<EditorTool, ToolStripMenuItem> shapeItems = new();
     private readonly ToolStripSplitButton shapesButton = new();
     private EditorTool selectedShape = EditorTool.Rectangle;
-    private readonly ComboBox paletteSize = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 212 };
+    private Control smudgeSizeRow = null!;
+    private Control smudgeStrengthRow = null!;
     private readonly ToolStripMenuItem undoItem = new("Отменить");
     private readonly ToolStripMenuItem redoItem = new("Повторить");
     private readonly ToolStripMenuItem gridItem = new("Пиксельная сетка");
     private readonly ToolTip tips = new();
-    private string? projectPath;
-    private bool updating;
+    private readonly ProjectLibrary library;
+    private LibraryProject libraryProject;
+    private PixelDocument lastDiskDocument;
+    private readonly System.Windows.Forms.Timer autoSaveTimer = new() { Interval = 1500 };
+    private readonly ToolStripStatusLabel saveStatus = new();
+    private string? autoSaveError;
 
-    public MainForm(PixelDocument document, string? sourcePath, AppSettings settings, bool initiallyModified = false)
+    public MainForm(ProjectLibrary library, LibraryProject project, AppSettings settings, PixelDocument? initialDocument = null)
     {
+        this.library = library;
+        libraryProject = project;
         this.settings = settings;
-        session = new EditorSession(document);
-        if (IsProject(sourcePath)) projectPath = Path.GetFullPath(sourcePath!);
-        if (initiallyModified || (sourcePath != null && !IsProject(sourcePath))) session.Load(document, false);
+        session = new EditorSession(library.Load(project.Id));
+        lastDiskDocument = session.Document.Clone();
+        if (initialDocument != null && !initialDocument.ContentEquals(session.Document)) session.Load(initialDocument, false);
         canvas = new CanvasControl(session)
         {
             Dock = DockStyle.Fill, ShowGrid = settings.ShowGrid,
             PencilSize = settings.PencilSize, EraserSize = settings.EraserSize,
+            SmudgeSize = settings.SmudgeSize, SmudgeStrength = settings.SmudgeStrength,
             DarkBackground = settings.Background == "Темный"
         };
         palette = new PaletteControl(session);
@@ -46,8 +54,21 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
         BuildInterface();
-        session.Changed += (_, _) => UpdateInterface();
-        canvas.ColorPicked += color => { canvas.PrimaryColor = color; UpdateColors(); };
+        session.Changed += (_, _) =>
+        {
+            autoSaveError = null;
+            UpdateInterface();
+            autoSaveTimer.Stop();
+            if (session.IsDirty) autoSaveTimer.Start();
+        };
+        autoSaveTimer.Tick += (_, _) => AutoSave();
+        if (session.IsDirty) autoSaveTimer.Start();
+        canvas.ColorPicked += color =>
+        {
+            canvas.PrimaryColor = color;
+            SelectTool(EditorTool.Pencil);
+            UpdateColors();
+        };
         canvas.StatusChanged += text => cursorStatus.Text = text;
         canvas.ViewChanged += (_, _) => zoomStatus.Text = $"{canvas.ZoomPercent}%";
         palette.ColorSelected += (index, secondary) =>
@@ -81,10 +102,13 @@ public sealed class MainForm : Form
         body.Controls.Add(sidebar);
         Controls.Add(body);
         var status = new StatusStrip { BackColor = Color.FromArgb(247, 246, 239), SizingGrip = true };
-        status.Items.AddRange([documentStatus, cursorStatus, zoomStatus]);
+        status.ShowItemToolTips = true;
+        status.Items.AddRange([documentStatus, saveStatus, cursorStatus, zoomStatus]);
         Controls.Add(status);
         var toolbar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(8, 5, 8, 5),
             BackColor = Color.FromArgb(240, 239, 230), RenderMode = ToolStripRenderMode.System };
+        AddToolButton(toolbar, "← Главная", Close);
+        toolbar.Items.Add(new ToolStripSeparator());
         AddToolButton(toolbar, "Новый", NewDocument);
         AddToolButton(toolbar, "Открыть", OpenDocument);
         AddToolButton(toolbar, "Сохранить", () => SaveProject(false));
@@ -102,22 +126,17 @@ public sealed class MainForm : Form
         var menu = BuildMenu();
         Controls.Add(menu);
         MainMenuStrip = menu;
-        var header = new Panel { Dock = DockStyle.Top, Height = 66, BackColor = Color.FromArgb(24, 65, 62) };
-        header.Controls.Add(new Label { Text = "PIXEL / ART", Font = new Font("Consolas", 23, FontStyle.Bold),
-            ForeColor = Color.FromArgb(248, 240, 214), AutoSize = true, Location = new Point(16, 12) });
-        header.Controls.Add(new Label { Text = "Маленький холст. Большие идеи.", AutoSize = true,
-            ForeColor = Color.FromArgb(183, 212, 196), Location = new Point(292, 24) });
-        Controls.Add(header);
 
         AddHeading(sidebar, "01 / ИНСТРУМЕНТЫ");
         var toolPanel = new FlowLayoutPanel { Width = 218, Height = 98, Margin = new Padding(0, 6, 0, 10) };
         (EditorTool Tool, string Name)[] tools = [
             (EditorTool.Pencil, "Карандаш · B"), (EditorTool.Eraser, "Ластик · E"),
-            (EditorTool.Fill, "Заливка · F"), (EditorTool.Picker, "Пипетка · I"), (EditorTool.Pan, "Рука · H")
+            (EditorTool.Smudge, "Смещение пятна · S"), (EditorTool.Fill, "Заливка · F"),
+            (EditorTool.Picker, "Пипетка · I"), (EditorTool.Pan, "Рука · H")
         ];
         foreach (var entry in tools)
         {
-            var button = new Button { Image = toolIcons[entry.Tool], Width = 68, Height = 44, FlatStyle = FlatStyle.Flat,
+            var button = new Button { Image = toolIcons[entry.Tool], Width = 50, Height = 44, FlatStyle = FlatStyle.Flat,
                 Margin = new Padding(0, 0, 4, 4), TabStop = false, AccessibleName = entry.Name };
             button.FlatAppearance.BorderColor = Color.FromArgb(213, 218, 204);
             tips.SetToolTip(button, entry.Name);
@@ -125,12 +144,12 @@ public sealed class MainForm : Form
             toolButtons.Add(entry.Tool, button);
             toolPanel.Controls.Add(button);
         }
-        var shapeStrip = new ToolStrip { AutoSize = false, Width = 68, Height = 44, Padding = Padding.Empty,
+        var shapeStrip = new ToolStrip { AutoSize = false, Width = 50, Height = 44, Padding = Padding.Empty,
             Margin = new Padding(0, 0, 4, 4), GripStyle = ToolStripGripStyle.Hidden, CanOverflow = false,
             ImageScalingSize = new Size(28, 28), Dock = DockStyle.None, BackColor = Color.FromArgb(251, 250, 244) };
         shapesButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         shapesButton.AutoSize = false;
-        shapesButton.Size = new Size(66, 42);
+        shapesButton.Size = new Size(48, 42);
         shapesButton.AccessibleName = "Фигуры";
         shapesButton.ButtonClick += (_, _) => { canvas.CancelGesture(); SelectTool(selectedShape); canvas.Focus(); };
         (EditorTool Tool, string Name)[] shapes = [
@@ -155,6 +174,14 @@ public sealed class MainForm : Form
         {
             canvas.EraserSize = settings.EraserSize = size;
         });
+        smudgeSizeRow = AddBrushSize(sidebar, "Смещение, px", settings.SmudgeSize, "SmudgeSize", size =>
+        {
+            canvas.SmudgeSize = settings.SmudgeSize = size;
+        }, hint: "Диаметр круглой кисти «Смещение пятна» в пикселях.");
+        smudgeStrengthRow = AddBrushSize(sidebar, "Сила пятна, %", settings.SmudgeStrength, "SmudgeStrength", strength =>
+        {
+            canvas.SmudgeStrength = settings.SmudgeStrength = strength;
+        }, minimum: 0, maximum: 100, hint: "0% — без изменений, 100% — сильный перенос подхваченных цветов. Основной цвет не используется.");
         var filled = new CheckBox { Text = "Закрашенные фигуры", AutoSize = true };
         filled.CheckedChanged += (_, _) => canvas.FilledShapes = filled.Checked;
         sidebar.Controls.Add(filled);
@@ -176,15 +203,15 @@ public sealed class MainForm : Form
         var transparent = new Button { Text = "Прозрачный цвет", Width = 212, Height = 30, FlatStyle = FlatStyle.Flat };
         transparent.Click += (_, _) => { canvas.PrimaryColor = 0; UpdateColors(); };
         sidebar.Controls.Add(transparent);
-        paletteSize.Items.AddRange(["2 цвета", "4 цвета", "16 цветов", "256 цветов"]);
-        paletteSize.Margin = new Padding(0, 9, 0, 8);
-        paletteSize.SelectedIndexChanged += (_, _) =>
-        {
-            if (updating || paletteSize.SelectedIndex < 0) return;
-            int count = new[] { 2, 4, 16, 256 }[paletteSize.SelectedIndex];
-            Run(() => session.Apply(doc => doc.SetPaletteSize(count)));
-        };
-        sidebar.Controls.Add(paletteSize);
+        var addColor = new Button { Text = "Добавить цвет…", Name = "AddPaletteColor", Width = 212, Height = 30,
+            FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 9, 0, 4) };
+        addColor.Click += (_, _) => Run(ChoosePaletteColor);
+        sidebar.Controls.Add(addColor);
+        var addCurrent = new Button { Text = "+ Текущий цвет в палитру", Name = "AddCurrentPaletteColor", Width = 212, Height = 30,
+            FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 0, 0, 8) };
+        addCurrent.Click += (_, _) => Run(() => AddPaletteColor(canvas.PrimaryColor));
+        tips.SetToolTip(addCurrent, "Добавить основной цвет, в том числе выбранный пипеткой или прозрачный. Палитра хранится в проекте.");
+        sidebar.Controls.Add(addCurrent);
         sidebar.Controls.Add(palette);
         sidebar.Controls.Add(new Label { Text = "ЛКМ — основной цвет\nПКМ — второй цвет\nДвойной щелчок — изменить цвет\n\nКолесо — масштаб\nПробел + ЛКМ / средняя — сдвиг вида\nF1 — вся справка", AutoSize = true,
             ForeColor = Color.FromArgb(93, 111, 103), Margin = new Padding(0, 12, 0, 20), Font = new Font("Segoe UI", 9) });
@@ -197,10 +224,10 @@ public sealed class MainForm : Form
         AddMenu(file, "Новый…", Keys.Control | Keys.N, NewDocument);
         AddMenu(file, "Открыть / импортировать…", Keys.Control | Keys.O, OpenDocument);
         AddMenu(file, "Сохранить проект", Keys.Control | Keys.S, () => SaveProject(false));
-        AddMenu(file, "Сохранить проект как…", Keys.Control | Keys.Shift | Keys.S, () => SaveProject(true));
+        AddMenu(file, "Сохранить копию проекта…", Keys.Control | Keys.Shift | Keys.S, () => SaveProject(true));
         AddMenu(file, "Экспорт PNG…", Keys.Control | Keys.E, ExportPng);
         file.DropDownItems.Add(new ToolStripSeparator());
-        AddMenu(file, "Выход", Keys.Alt | Keys.F4, Close);
+        AddMenu(file, "На главный экран", Keys.Control | Keys.Home, Close);
         var edit = new ToolStripMenuItem("Правка");
         undoItem.ShortcutKeys = Keys.Control | Keys.Z;
         undoItem.Click += (_, _) => Run(session.Undo);
@@ -261,15 +288,17 @@ public sealed class MainForm : Form
         parent.Controls.Add(button);
     }
 
-    private void AddBrushSize(FlowLayoutPanel parent, string label, int value, string name, Action<int> changed)
+    private Control AddBrushSize(FlowLayoutPanel parent, string label, int value, string name, Action<int> changed,
+        int minimum = 1, int maximum = RasterDrawing.MaxBrushSize, string? hint = null)
     {
         var row = new FlowLayoutPanel { Width = 216, Height = 34, Margin = new Padding(0, 0, 0, 4) };
         row.Controls.Add(new Label { Text = label, Width = 130, Margin = new Padding(0, 5, 8, 0) });
-        var input = new NumericUpDown { Name = name, Minimum = 1, Maximum = RasterDrawing.MaxBrushSize, Value = value, Width = 70 };
+        var input = new NumericUpDown { Name = name, Minimum = minimum, Maximum = maximum, Value = Math.Clamp(value, minimum, maximum), Width = 70 };
         input.ValueChanged += (_, _) => changed((int)input.Value);
-        tips.SetToolTip(input, "Сторона квадратного отпечатка в пикселях; размер каждого инструмента независимый.");
+        tips.SetToolTip(input, hint ?? "Сторона квадратного отпечатка в пикселях; размер каждого инструмента независимый.");
         row.Controls.Add(input);
         parent.Controls.Add(row);
+        return row;
     }
 
     private static void AddHeading(FlowLayoutPanel parent, string text) =>
@@ -280,7 +309,7 @@ public sealed class MainForm : Form
     {
         canvas.CancelGesture();
         try { action(); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or System.Runtime.InteropServices.ExternalException or NotSupportedException or OutOfMemoryException)
         {
             string message = ex is OutOfMemoryException
@@ -294,6 +323,7 @@ public sealed class MainForm : Form
     {
         canvas.Tool = tool;
         canvas.SetSpacePan(false);
+        smudgeSizeRow.Visible = smudgeStrengthRow.Visible = tool == EditorTool.Smudge;
         foreach (var pair in toolButtons)
         {
             pair.Value.BackColor = pair.Key == tool ? Color.FromArgb(203, 231, 216) : Color.FromArgb(251, 250, 244);
@@ -308,16 +338,15 @@ public sealed class MainForm : Form
 
     private void UpdateInterface()
     {
-        updating = true;
         int count = session.Document.Palette.Count;
-        paletteSize.SelectedIndex = Array.IndexOf(new[] { 2, 4, 16, 256 }, count);
-        updating = false;
         palette.UpdatePalette();
         UpdateColors();
         undoItem.Enabled = session.CanUndo;
         redoItem.Enabled = session.CanRedo;
-        string name = projectPath == null ? "Без имени" : Path.GetFileName(projectPath);
-        Text = $"{(session.IsDirty ? "* " : "")}{name} — PixelArt";
+        Text = $"{(session.IsDirty ? "* " : "")}{libraryProject.Name} — Редактор";
+        saveStatus.Text = autoSaveError != null ? "Ошибка сохранения" : session.IsDirty ? "Ожидает сохранения…" : "Сохранено";
+        saveStatus.ForeColor = autoSaveError != null ? Color.Firebrick : Color.FromArgb(39, 103, 88);
+        saveStatus.ToolTipText = autoSaveError ?? "Автосохранение в библиотеку. Ctrl+S — сохранить сейчас.";
         documentStatus.Text = $"{session.Document.Width} × {session.Document.Height} px  |  {count} цветов";
     }
 
@@ -346,6 +375,19 @@ public sealed class MainForm : Form
         UpdateColors();
     }
 
+    private void ChoosePaletteColor()
+    {
+        using var dialog = new ColorDialog { FullOpen = true, Color = Color.FromArgb(canvas.PrimaryColor) };
+        if (dialog.ShowDialog(this) == DialogResult.OK) AddPaletteColor(dialog.Color.ToArgb());
+    }
+
+    private void AddPaletteColor(int color)
+    {
+        session.Apply(doc => doc.AddPaletteColor(color));
+        canvas.PrimaryColor = color;
+        UpdateColors();
+    }
+
     private void EditPaletteColor(int index)
     {
         using var dialog = new ColorDialog { FullOpen = true, Color = Color.FromArgb(session.Document.Palette[index]) };
@@ -358,55 +400,86 @@ public sealed class MainForm : Form
         UpdateColors();
     }
 
-    private bool ConfirmDiscard()
+    private void SaveBeforeLeaving()
     {
-        if (!session.IsDirty) return true;
-        var result = MessageBox.Show(this, "Сохранить изменения в проекте?", "Несохраненные изменения",
-            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-        return result == DialogResult.No || (result == DialogResult.Yes && SaveProject(false));
+        canvas.CancelGesture();
+        if (session.IsDirty) SaveProject(false);
     }
 
     private void NewDocument()
     {
-        using var dialog = new NumberDialog("Новый холст", "Ширина (px)", settings.NewWidth, 1, 256,
-            "Высота (px)", settings.NewHeight);
-        if (dialog.ShowDialog(this) != DialogResult.OK || !ConfirmDiscard()) return;
-        settings.NewWidth = dialog.First;
-        settings.NewHeight = dialog.Second;
-        projectPath = null;
-        session.Load(new PixelDocument(dialog.First, dialog.Second));
-        canvas.FitToWindow();
+        using var dialog = new ProjectDialog("Новый проект", "Новый проект", settings.NewWidth, settings.NewHeight);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        SaveBeforeLeaving();
+        settings.NewWidth = dialog.WidthPixels;
+        settings.NewHeight = dialog.HeightPixels;
+        ReplaceProject(new PixelDocument(dialog.WidthPixels, dialog.HeightPixels), dialog.ProjectName);
     }
 
     private void OpenDocument()
     {
         using var dialog = new OpenFileDialog
         {
-            Title = "Открыть проект или импортировать изображение",
-            Filter = "Проекты и изображения|*.pixelart;*.json;*.png;*.jpg;*.jpeg;*.bmp;*.gif|Проект PixelArt|*.pixelart;*.json|Изображения|*.png;*.jpg;*.jpeg;*.bmp;*.gif"
+            Title = "Импортировать изображение или проект в библиотеку",
+            Filter = "Проекты и изображения|*.pixelart;*.json;*.png;*.jpg;*.jpeg;*.bmp;*.gif"
         };
-        if (dialog.ShowDialog(this) != DialogResult.OK || !ConfirmDiscard()) return;
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        SaveBeforeLeaving();
         var document = ImageFiles.Open(dialog.FileName);
-        projectPath = IsProject(dialog.FileName) ? dialog.FileName : null;
-        session.Load(document, IsProject(dialog.FileName));
-        canvas.FitToWindow();
+        string name = new string(Path.GetFileNameWithoutExtension(dialog.FileName).Where(c => !char.IsControl(c)).Take(80).ToArray()).Trim();
+        ReplaceProject(document, name.Length == 0 ? "Импортированный проект" : name);
     }
 
-    private bool SaveProject(bool saveAs)
+    private void ReplaceProject(PixelDocument document, string name)
     {
-        string? path = projectPath;
-        if (saveAs || path == null)
-        {
-            using var dialog = new SaveFileDialog { Filter = "Проект PixelArt|*.pixelart", DefaultExt = "pixelart",
-                FileName = path == null ? "drawing.pixelart" : Path.GetFileName(path), AddExtension = true };
-            if (dialog.ShowDialog(this) != DialogResult.OK) return false;
-            path = dialog.FileName;
-        }
-        if (!IsProject(path)) throw new ArgumentException("Укажите расширение проекта .pixelart или .json.");
-        new JsonDocumentStore().Save(session.Document, path);
-        projectPath = path;
+        var next = library.Create(name, document);
+        autoSaveTimer.Stop();
+        libraryProject = next;
+        lastDiskDocument = document.Clone();
+        autoSaveError = null;
+        session.Load(document);
+        canvas.FitToWindow();
+        canvas.Focus();
+    }
+
+    public void SaveCurrentProject()
+    {
+        if (session.IsEditing) throw new InvalidOperationException("Сначала завершите штрих.");
+        // Синхронизатор или другой редактор мог изменить файл после его открытия.
+        if (!library.Load(libraryProject.Id).ContentEquals(lastDiskDocument))
+            throw new IOException("Проект на диске изменен другим приложением. Автозапись остановлена. Сохраните свою копию через Ctrl+Shift+S и откройте актуальный проект заново.");
+        library.Save(libraryProject.Id, session.Document);
+        lastDiskDocument = session.Document.Clone();
+        autoSaveTimer.Stop();
+        autoSaveError = null;
         session.MarkSaved();
+    }
+
+    private bool SaveProject(bool saveCopy)
+    {
+        if (!saveCopy) { SaveCurrentProject(); return true; }
+        using var dialog = new SaveFileDialog { Filter = "Проект PixelArt|*.pixelart", DefaultExt = "pixelart",
+            FileName = ExportName() + ".pixelart", AddExtension = true };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+        if (!IsProject(dialog.FileName)) throw new ArgumentException("Укажите расширение проекта .pixelart или .json.");
+        // Внешняя копия не меняет ID/путь библиотечного проекта и не подменяет автосохранение.
+        new JsonDocumentStore().Save(session.Document, dialog.FileName);
+        cursorStatus.Text = "Копия проекта сохранена";
         return true;
+    }
+
+    private string ExportName() => string.Join("_", libraryProject.Name.Split(Path.GetInvalidFileNameChars()));
+
+    private void AutoSave()
+    {
+        autoSaveTimer.Stop();
+        if (!session.IsDirty || session.IsEditing) return;
+        try { SaveCurrentProject(); }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
+        {
+            autoSaveError = ex.Message;
+            UpdateInterface();
+        }
     }
 
     private void ExportPng()
@@ -414,7 +487,7 @@ public sealed class MainForm : Form
         using var scale = new NumberDialog("Экспорт PNG", "Размер пикселя", settings.ExportScale, 1, 16);
         if (scale.ShowDialog(this) != DialogResult.OK) return;
         using var dialog = new SaveFileDialog { Filter = "Изображение PNG|*.png", DefaultExt = "png", AddExtension = true,
-            FileName = projectPath == null ? "drawing.png" : Path.GetFileNameWithoutExtension(projectPath) + ".png" };
+            FileName = ExportName() + ".png" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (!Path.GetExtension(dialog.FileName).Equals(".png", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("Для экспорта укажите расширение .png.");
@@ -454,10 +527,8 @@ public sealed class MainForm : Form
         using var image = Clipboard.GetImage();
         if (image == null) return;
         var document = ImageFiles.Import(image);
-        if (!ConfirmDiscard()) return;
-        projectPath = null;
-        session.Load(document, false);
-        canvas.FitToWindow();
+        SaveBeforeLeaving();
+        ReplaceProject(document, "Из буфера обмена");
     }
 
     private void ToggleGrid()
@@ -469,15 +540,18 @@ public sealed class MainForm : Form
     }
 
     private void ShowHelp() => MessageBox.Show(this, CommandLine.HelpText + "\n\n" +
-        "Инструменты: B карандаш, E ластик, F заливка, I пипетка, L линия, R прямоугольник, O эллипс, T сетка, H рука.\n" +
+        "Инструменты: B карандаш, E ластик, S смещение пятна, F заливка, I пипетка, L линия, R прямоугольник, O эллипс, T сетка, H рука.\n" +
         "X — поменять цвета. G — показать/скрыть сетку. Esc — отменить текущий штрих.\n" +
         "ЛКМ / ПКМ — основной / второй цвет. Колесо — зум к указателю, пробел + ЛКМ или средняя кнопка — панорамирование.\n" +
         "Кнопки инструментов — с иконками и подсказками. Стрелка у фигур открывает список. Размер карандаша/ластика: 1–32 px.\n" +
-        "Ctrl+N / O / S — новый / открыть / сохранить; Ctrl+Shift+S — сохранить как.\n" +
+        "Ctrl+N / O / S — новый / открыть / сохранить; Ctrl+Shift+S — сохранить внешнюю копию.\n" +
         "Ctrl+Z / Y — отменить / повторить; Ctrl+E — PNG; Ctrl+C / V — буфер обмена; Ctrl+0 — вписать.\n" +
-        "Для окружности нарисуйте эллипс в квадрате. Импорт заменяет холст, большие картинки уменьшаются до 256×256.\n" +
-        "Палитра не ограничивает цвета картинки. Ее изменение не перекрашивает готовые пиксели.\n" +
-        "PNG не хранит палитру и историю. Для продолжения работы сохраняйте .pixelart.", "Справка PixelArt", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        "Для окружности нарисуйте эллипс в квадрате. Импорт создает отдельный проект, картинки уменьшаются до 256×256.\n" +
+        "Смещение пятна переносит цвета с холста. При выборе S появляются размер 1–32 px и сила 0–100%.\n" +
+        "После пипетки включается карандаш. «Добавить цвет» и «+ Текущий цвет» дополняют палитру проекта.\n" +
+        "Палитра сохраняется в проекте. Ее изменение не перекрашивает готовые пиксели.\n" +
+        "Изменения автоматически сохраняются в библиотеку. «Главная» или Ctrl+Home — вернуться к проектам.\n" +
+        "PNG не хранит палитру и историю. Ctrl+Shift+S — отдельная копия .pixelart.", "Справка PixelArt", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
@@ -488,7 +562,7 @@ public sealed class MainForm : Form
             if (keyData == Keys.Space) { canvas.Focus(); canvas.SetSpacePan(true); return true; }
             var tool = keyData switch
             {
-                Keys.B => EditorTool.Pencil, Keys.E => EditorTool.Eraser, Keys.F => EditorTool.Fill,
+                Keys.B => EditorTool.Pencil, Keys.E => EditorTool.Eraser, Keys.S => EditorTool.Smudge, Keys.F => EditorTool.Fill,
                 Keys.I => EditorTool.Picker, Keys.L => EditorTool.Line, Keys.R => EditorTool.Rectangle,
                 Keys.O => EditorTool.Ellipse, Keys.T => EditorTool.Grid, Keys.H => EditorTool.Pan,
                 _ => (EditorTool?)null
@@ -506,18 +580,15 @@ public sealed class MainForm : Form
         canvas.CancelGesture();
         try
         {
-            if (!ConfirmDiscard()) { e.Cancel = true; return; }
+            autoSaveTimer.Stop();
+            SaveBeforeLeaving();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
         {
-            MessageBox.Show(this, ex.Message, "Ошибка сохранения", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            e.Cancel = true;
-            return;
-        }
-        try { settings.Save(); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            MessageBox.Show(this, "Не удалось сохранить настройки: " + ex.Message, "Настройки");
+            var result = MessageBox.Show(this, "Не удалось сохранить проект: " + ex.Message +
+                "\n\nНажмите «Нет», чтобы остаться в редакторе. Ctrl+Shift+S позволяет сохранить внешнюю копию.\nЗакрыть редактор БЕЗ сохранения?",
+                "Ошибка сохранения", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (result != DialogResult.Yes) { e.Cancel = true; return; }
         }
     }
 
@@ -525,6 +596,7 @@ public sealed class MainForm : Form
     {
         if (disposing)
         {
+            autoSaveTimer.Dispose();
             tips.Dispose();
             foreach (var image in toolIcons.Values) image.Dispose();
         }

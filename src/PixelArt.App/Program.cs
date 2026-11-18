@@ -38,11 +38,14 @@ internal static class Program
                 var settings = AppSettings.Load();
                 if (options.HideGrid) settings.ShowGrid = false;
                 bool modified = options.RotateClockwise.HasValue || options.MoveX != 0 || options.MoveY != 0;
-                Application.Run(new MainForm(document, options.InputPath, settings, modified));
+                var library = new ProjectLibrary(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PixelArt", "Projects"));
+                bool openEditor = options.InputPath != null || args.Contains("--new") || modified;
+                Application.Run(new HomeForm(settings, library, openEditor ? document : null, options.InputPath));
             }
             return 0;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or NotSupportedException or ExternalException or OutOfMemoryException)
         {
             string message = ex is OutOfMemoryException ? "Недостаточно памяти или формат изображения поврежден/не поддерживается." : ex.Message;

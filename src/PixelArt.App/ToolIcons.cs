@@ -45,6 +45,14 @@ public static class ToolIcons
                 g.FillEllipse(accent, 18, 3, 7, 7);
                 g.DrawEllipse(pen, 18, 3, 7, 7);
                 break;
+            case EditorTool.Smudge:
+                g.FillEllipse(accent, 2, 15, 15, 10);
+                g.DrawLines(pen, [new Point(10, 22), new Point(11, 16), new Point(19, 4),
+                    new Point(22, 3), new Point(25, 6), new Point(24, 9), new Point(20, 12), new Point(14, 23)]);
+                g.DrawLine(pen, 3, 18, 7, 18);
+                g.DrawLine(pen, 2, 23, 6, 23);
+                g.DrawLine(pen, 19, 23, 25, 23);
+                break;
             case EditorTool.Line:
                 g.DrawLine(pen, 5, 23, 23, 5);
                 g.FillRectangle(accent, 3, 21, 5, 5);

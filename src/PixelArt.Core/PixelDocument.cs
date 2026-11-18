@@ -57,6 +57,16 @@ public sealed class PixelDocument
         Width == other.Width && Height == other.Height &&
         pixels.SequenceEqual(other.pixels) && Palette.SequenceEqual(other.Palette);
 
+    public int AddPaletteColor(int color)
+    {
+        int index = Palette.IndexOf(color);
+        if (index >= 0) return index;
+        if (Palette.Count >= 256)
+            throw new InvalidOperationException("В палитре уже 256 цветов. Измените существующую ячейку двойным щелчком.");
+        Palette.Add(color);
+        return Palette.Count - 1;
+    }
+
     public void SetPaletteSize(int count)
     {
         if (count is < 2 or > 256) throw new ArgumentOutOfRangeException(nameof(count));
